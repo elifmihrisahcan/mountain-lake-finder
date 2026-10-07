@@ -5,6 +5,7 @@ Examples:
   python -m lakefinder --lat 51.42 --lon -116.18 --radius 30 --map banff.html
   python -m lakefinder --bbox 46.4,7.8,46.8,8.3 --json out.json
   python -m lakefinder --from-file cache.json        # re-score saved Overpass data offline
+  python -m lakefinder --country Argentina --map argentina.html   # whole country, tile by tile
 """
 from __future__ import annotations
 
@@ -12,8 +13,8 @@ import argparse
 import json
 import sys
 
-from . import geo, osm, report
-from .scoring import Settings, assess_lakes, score_lakes, score_places
+from . import country, geo, osm, report
+from .scoring import LandCover, Settings, assess_lakes, score_lakes, score_places
 
 
 def main(argv=None) -> int:
@@ -24,6 +25,7 @@ def main(argv=None) -> int:
     where.add_argument("--lat", type=float, help="latitude of search center (use with --lon)")
     where.add_argument("--bbox", help="south,west,north,east")
     where.add_argument("--from-file", help="load a saved Overpass JSON response instead of querying")
+    where.add_argument("--country", help="scan a whole country (name or ISO code), tile by tile")
     ap.add_argument("--lon", type=float)
     ap.add_argument("--radius", type=float, default=20, help="search radius in km around --place/--lat (default 20)")
     ap.add_argument("--top", type=int, default=15, help="rows to print")
@@ -34,10 +36,21 @@ def main(argv=None) -> int:
     ap.add_argument("--no-elevation", action="store_true",
                     help="don't look up missing lake/glacier elevations from the Open-Meteo DEM")
     ap.add_argument("--save-raw", help="save the raw Overpass response (re-use with --from-file)")
+    ap.add_argument("--cache-dir", help="--country: where tile downloads are cached (default cache/<country>)")
+    ap.add_argument("--tile-deg", type=float, default=1.0, help="--country: tile size in degrees (default 1)")
+    ap.add_argument("--max-tiles", type=int, help="--country: only scan this many tiles (for a quick test)")
     for name, default in vars(Settings()).items():
         ap.add_argument("--" + name.replace("_", "-"), type=type(default), default=default,
                         help=argparse.SUPPRESS if name.endswith("points") else None)
     args = ap.parse_args(argv)
+    settings = Settings(**{k: getattr(args, k) for k in vars(Settings())})
+
+    if args.country:
+        cache = args.cache_dir or f"cache/{args.country.lower().replace(' ', '-')}"
+        results, lakes, lake_scores = country.scan(args.country, settings, cache, args.tile_deg,
+                                                   max_tiles=args.max_tiles, elevation=not args.no_elevation,
+                                                   require=not args.all)
+        return _output(args, results, lakes, lake_scores)
 
     if args.from_file:
         with open(args.from_file, encoding="utf-8") as f:
@@ -75,11 +88,14 @@ def main(argv=None) -> int:
         n = osm.fill_elevations(features["lake"] + features["glacier"])
         print(f"Estimated elevation for {n} lakes/glaciers from terrain data", file=sys.stderr)
 
-    settings = Settings(**{k: getattr(args, k) for k in vars(Settings())})
     lakes = assess_lakes(features, settings)
-    lake_scores = score_lakes(features, lakes, settings, require_mountains=not args.all)
-    results, _ = score_places(features, settings, require_both=not args.all, assessed=lakes)
+    cover = LandCover(features, settings)
+    lake_scores = score_lakes(features, lakes, settings, require_mountains=not args.all, cover=cover)
+    results, _ = score_places(features, settings, require_both=not args.all, assessed=lakes, cover=cover)
+    return _output(args, results, lakes, lake_scores)
 
+
+def _output(args, results, lakes, lake_scores) -> int:
     print(report.to_table(results, lakes, args.top, lake_scores))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:

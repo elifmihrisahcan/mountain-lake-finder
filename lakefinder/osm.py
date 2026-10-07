@@ -20,6 +20,11 @@ OVERPASS_URLS = [
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 ELEVATION_URL = "https://api.open-meteo.com/v1/elevation"
 
+GREEN_LANDUSE = {"forest", "meadow", "grass", "orchard", "vineyard", "farmland", "allotments",
+                 "recreation_ground", "village_green"}
+GREEN_NATURAL = {"wood", "grassland", "scrub", "heath", "wetland"}
+GREEN_LEISURE = {"park", "garden"}
+BARREN_NATURAL = {"sand", "desert", "shingle"}
 ROCKY_NATURAL = {"scree", "bare_rock", "arete", "cliff", "ridge", "valley", "moraine", "rock", "stone"}
 
 
@@ -27,7 +32,7 @@ ROCKY_NATURAL = {"scree", "bare_rock", "arete", "cliff", "ridge", "valley", "mor
 class Feature:
     osm_type: str
     osm_id: int
-    kind: str  # place | peak | lake | glacier | rocky | stream
+    kind: str  # place | peak | lake | glacier | rocky | stream | green | barren
     tags: Dict[str, str]
     points: List[geo.Point]
     node_ids: List[int] = field(default_factory=list)
@@ -61,6 +66,20 @@ class Feature:
         return f"https://www.openstreetmap.org/{self.osm_type}/{self.osm_id}"
 
 
+def landcover(sel: str) -> str:
+    """Overpass statements for green and barren land cover; `sel` is a bbox or (around...) filter."""
+    green_lu = "|".join(sorted(GREEN_LANDUSE))
+    green_nat = "|".join(sorted(GREEN_NATURAL))
+    barren = "|".join(sorted(BARREN_NATURAL | {"bare_rock", "scree"}))
+    return f"""  way["landuse"~"^({green_lu})$"]{sel};
+  relation["landuse"~"^({green_lu})$"]{sel};
+  way["natural"~"^({green_nat})$"]{sel};
+  relation["natural"~"^({green_nat})$"]{sel};
+  way["leisure"~"^(park|garden)$"]{sel};
+  way["natural"~"^({barren})$"]{sel};
+  relation["natural"~"^({barren})$"]{sel};"""
+
+
 def build_query(box: Tuple[float, float, float, float], timeout: int = 180) -> str:
     s, w, n, e = box
     b = f"({s},{w},{n},{e})"
@@ -79,6 +98,7 @@ def build_query(box: Tuple[float, float, float, float], timeout: int = 180) -> s
   node["natural"~"^(arete|valley|moraine|rock)$"]{b};
   way["geological"="moraine"]{b};
   way["waterway"~"^(stream|river)$"]{b};
+{landcover(b)}
 );
 out geom;
 """
@@ -188,11 +208,16 @@ def _classify(tags: Dict[str, str]) -> Optional[str]:
         return "rocky"
     if tags.get("waterway") in ("stream", "river"):
         return "stream"
+    if (natural in GREEN_NATURAL or tags.get("landuse") in GREEN_LANDUSE
+            or tags.get("leisure") in GREEN_LEISURE):
+        return "green"
+    if natural in BARREN_NATURAL:
+        return "barren"
     return None
 
 
 def parse(data: dict) -> Dict[str, List[Feature]]:
-    out: Dict[str, List[Feature]] = {k: [] for k in ("place", "peak", "lake", "glacier", "rocky", "stream")}
+    out: Dict[str, List[Feature]] = {k: [] for k in ("place", "peak", "lake", "glacier", "rocky", "stream", "green", "barren")}
     for el in data.get("elements", []):
         tags = el.get("tags", {})
         kind = _classify(tags)

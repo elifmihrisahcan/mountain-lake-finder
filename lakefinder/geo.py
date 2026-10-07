@@ -81,3 +81,51 @@ def thin(points: List[Point], max_points: int = 200) -> List[Point]:
         return points
     step = len(points) / max_points
     return [points[int(i * step)] for i in range(max_points)]
+
+
+def point_in_ring(p: Point, ring: Sequence[Point]) -> bool:
+    """Ray-casting point-in-polygon test (lat/lon treated as planar; fine at these scales)."""
+    y, x = p
+    inside = False
+    j = len(ring) - 1
+    for i in range(len(ring)):
+        yi, xi = ring[i]
+        yj, xj = ring[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+class PolygonIndex:
+    """Grid index so 'which polygons contain this point?' doesn't scan every polygon."""
+
+    def __init__(self, polygons: Sequence[Sequence[Sequence[Point]]], cell_deg: float = 0.05):
+        self.cell = cell_deg
+        self.polygons = polygons  # each polygon = list of rings
+        self.grid: dict = {}
+        for idx, rings in enumerate(polygons):
+            pts = [q for r in rings for q in r]
+            if not pts:
+                continue
+            s, w, n, e = bbox(pts)
+            for i in range(int(math.floor(s / cell_deg)), int(math.floor(n / cell_deg)) + 1):
+                for j in range(int(math.floor(w / cell_deg)), int(math.floor(e / cell_deg)) + 1):
+                    self.grid.setdefault((i, j), []).append(idx)
+
+    def contains(self, p: Point) -> bool:
+        key = (int(math.floor(p[0] / self.cell)), int(math.floor(p[1] / self.cell)))
+        return any(point_in_ring(p, r) for idx in self.grid.get(key, ()) for r in self.polygons[idx])
+
+
+def sample_disc(center: Point, radius_m: float, n: int = 11) -> List[Point]:
+    """Grid of roughly (pi/4)*n*n points evenly covering a disc."""
+    dlat = math.degrees(radius_m / EARTH_RADIUS_M)
+    dlon = dlat / max(math.cos(math.radians(center[0])), 0.01)
+    out = []
+    for i in range(n):
+        for j in range(n):
+            u, v = (2 * i / (n - 1) - 1), (2 * j / (n - 1) - 1)
+            if u * u + v * v <= 1:
+                out.append((center[0] + u * dlat, center[1] + v * dlon))
+    return out

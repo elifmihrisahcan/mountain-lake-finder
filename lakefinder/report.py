@@ -31,7 +31,9 @@ def lake_score_dict(r: LakeScore) -> dict:
     return dict(
         lake_dict(r.lake),
         score=r.score,
-        points={"mountains": r.peak_points, "lake": r.lake_points, "blue_lake_bonus": r.blue_points},
+        points={"mountains": r.peak_points, "lake": r.lake_points, "blue_lake_bonus": r.blue_points,
+                "green": r.cover.points},
+        surroundings={"green": r.cover.green, "barren": r.cover.barren},
         peak_count=len(r.peaks),
         peaks=[{"name": p.name, "ele": p.ele} for p in r.peaks[:5]],
         nearest_place=r.nearest_place.name if r.nearest_place else None,
@@ -47,7 +49,9 @@ def place_dict(r: PlaceScore) -> dict:
         "lat": round(r.place.center[0], 5),
         "lon": round(r.place.center[1], 5),
         "score": r.score,
-        "points": {"mountains": r.peak_points, "lakes": r.lake_points, "blue_lake_bonus": r.blue_points},
+        "points": {"mountains": r.peak_points, "lakes": r.lake_points, "blue_lake_bonus": r.blue_points,
+                   "green": r.cover.points},
+        "surroundings": {"green": r.cover.green, "barren": r.cover.barren},
         "peak_count": len(r.peaks),
         "peaks": [{"name": p.name, "ele": p.ele} for p in r.peaks[:5]],
         "lakes": [dict(lake_dict(la), distance_km=r.lake_distances_km[la.lake.osm_id]) for la in r.lakes[:5]],
@@ -68,15 +72,15 @@ def to_table(results: List[PlaceScore], lakes: List[LakeAssessment], top: int,
     lines.append(f"Found {len(lakes)} lakes: {n_blue} glacier-fed (blue), {n_likely} likely blue.\n")
 
     if lake_scores is not None:
-        lines.append("LAKE SCOREBOARD — lakes with mountains around them (blue lakes get bonus points)")
-        lines.append(f"{'#':>3}  {'Lake':<26} {'Score':>6}  {'Mtn':>5} {'Lake':>5} {'Blue+':>5}  "
+        lines.append("LAKE SCOREBOARD — lakes with mountains around them (+ blue lakes, + green / - barren surroundings)")
+        lines.append(f"{'#':>3}  {'Lake':<26} {'Score':>6}  {'Mtn':>5} {'Lake':>5} {'Blue+':>5} {'Green':>5}  "
                      f"{'Colour':<12} {'Elev':>6}  Nearest place")
         for i, r in enumerate(lake_scores[:top], 1):
             la = r.lake
             ele = f"{la.lake.ele:.0f} m" if la.lake.ele is not None else "?"
             near = f"{r.nearest_place.name} {r.nearest_place_km} km" if r.nearest_place else "-"
             lines.append(f"{i:>3}  {(la.lake.name or '(unnamed)')[:26]:<26} {r.score:>6.1f}  {r.peak_points:>5.1f} "
-                         f"{r.lake_points:>5.1f} {r.blue_points:>5.1f}  {_colour(la):<12} {ele:>6}  {near}")
+                         f"{r.lake_points:>5.1f} {r.blue_points:>5.1f} {r.cover.points:>+5.1f}  {_colour(la):<12} {ele:>6}  {near}")
         if not lake_scores:
             lines.append("  No lakes with mountains nearby in this area.")
         blue = [r.lake for r in lake_scores[:top] if r.lake.is_blue or r.lake.is_likely_blue]
@@ -88,12 +92,12 @@ def to_table(results: List[PlaceScore], lakes: List[LakeAssessment], top: int,
         lines.append("")
 
     lines.append("PLACE SCOREBOARD — towns and villages near mountains and lakes")
-    lines.append(f"{'#':>3}  {'Place':<26} {'Score':>6}  {'Mtn':>5} {'Lake':>5} {'Blue+':>5}  Best lake")
+    lines.append(f"{'#':>3}  {'Place':<26} {'Score':>6}  {'Mtn':>5} {'Lake':>5} {'Blue+':>5} {'Green':>5}  Best lake")
     for i, r in enumerate(results[:top], 1):
         best = r.lakes[0]
         tag = f" ({_colour(best)})" if _colour(best) else ""
         lines.append(f"{i:>3}  {r.place.name[:26]:<26} {r.score:>6.1f}  {r.peak_points:>5.1f} "
-                     f"{r.lake_points:>5.1f} {r.blue_points:>5.1f}  "
+                     f"{r.lake_points:>5.1f} {r.blue_points:>5.1f} {r.cover.points:>+5.1f}  "
                      f"{best.lake.name or '(unnamed)'}{tag} {r.lake_distances_km[best.lake.osm_id]} km")
     if not results:
         lines.append("  No places with both mountains and lakes nearby in this area.")
@@ -119,7 +123,7 @@ MAP_TEMPLATE = """<!doctype html>
 </style></head><body><div id="map"></div><div id="side">
 <div class="tabs"><button id="tLakes" class="on">Lakes</button><button id="tPlaces">Places</button></div>
 <div id="list"></div>
-<p style="color:#666">Blue = glacier-fed lake (+ bonus). Light blue = likely blue (half bonus). Grey = other lakes. Red = places.</p></div>
+<p style="color:#666">Blue = glacier-fed lake (+ bonus). Light blue = likely blue (half bonus). Grey = other lakes. Red = places. Scores add points for green surroundings and subtract for barren ones.</p></div>
 <script>
 const DATA = __DATA__;
 const map = L.map('map');
@@ -128,12 +132,14 @@ L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const pill = l => l.blue ? '<span class=pill>blue</span>' : l.likely_blue ? '<span class="pill likely">likely blue</span>' : '';
 const peaksText = ps => ps.map(k => esc(k.name || '?') + (k.ele ? ' ' + k.ele + 'm' : '')).join(', ');
+const greenText = c => `${Math.round(c.green * 100)}% green, ${Math.round(c.barren * 100)}% barren`;
 const bounds = [], lakeMarkers = {}, placeMarkers = [];
 
 DATA.lakes.forEach(l => {
   bounds.push([l.lat, l.lon]);
   const st = l.blue ? ['#0a7bbd', '#2ec4e6', 8] : l.likely_blue ? ['#5aa9d6', '#b5e6f3', 7] : ['#888', '#bbb', 5];
-  const sc = l.score != null ? `Score <b>${l.score}</b> (mountains ${l.points.mountains} · lake ${l.points.lake} · blue bonus ${l.points.blue_lake_bonus})<br>` : '';
+  const sc = l.score != null ? `Score <b>${l.score}</b> (mountains ${l.points.mountains} · lake ${l.points.lake} · blue bonus ${l.points.blue_lake_bonus} · green ${l.points.green})<br>
+     Surroundings: ${greenText(l.surroundings)}<br>` : '';
   lakeMarkers[l.osm] = L.circleMarker([l.lat, l.lon], {radius: st[2], color: st[0], fillColor: st[1], fillOpacity: .85, weight: 2})
    .bindPopup(`<b>${esc(l.name || 'Unnamed lake')}</b>${pill(l)}<br>${sc}
      ${l.ele != null ? Math.round(l.ele) + ' m · ' : ''}${l.area_ha} ha${l.nearest_place ? ' · near ' + esc(l.nearest_place) + ' (' + l.nearest_place_km + ' km)' : ''}<br>
@@ -146,7 +152,8 @@ DATA.places.forEach(p => {
   bounds.push([p.lat, p.lon]);
   placeMarkers.push(L.circleMarker([p.lat, p.lon], {radius: 4 + 8 * p.score / maxScore, color: '#b22', fillColor: '#e55', fillOpacity: .6})
    .bindPopup(`<b>${esc(p.name)}</b> (${esc(p.type)})<br>Score <b>${p.score}</b><br>
-     Mountains ${p.points.mountains} · Lakes ${p.points.lakes} · Blue bonus ${p.points.blue_lake_bonus}<br>
+     Mountains ${p.points.mountains} · Lakes ${p.points.lakes} · Blue bonus ${p.points.blue_lake_bonus} · Green ${p.points.green}<br>
+     Surroundings: ${greenText(p.surroundings)}<br>
      Peaks: ${peaksText(p.peaks)}<br>
      Lakes: ${p.lakes.map(k => esc(k.name || 'unnamed') + pill(k) + ' ' + k.distance_km + 'km').join(', ')}`)
    .addTo(map));

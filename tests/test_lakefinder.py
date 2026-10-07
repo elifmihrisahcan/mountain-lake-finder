@@ -81,7 +81,8 @@ class ScoringTests(unittest.TestCase):
     def test_parse_classifies_features(self):
         f = osm.parse(raw_data())
         self.assertEqual({k: len(v) for k, v in f.items()},
-                         {"place": 1, "peak": 1, "lake": 2, "glacier": 1, "rocky": 1, "stream": 2})
+                         {"place": 1, "peak": 1, "lake": 2, "glacier": 1, "rocky": 1, "stream": 2,
+                          "green": 0, "barren": 0})
 
     def test_meltwater_stream_is_traced_downstream(self):
         f = osm.parse(raw_data())
@@ -159,6 +160,49 @@ class LakeScoreboardTests(unittest.TestCase):
         top = self.board(raw_data())[0]
         self.assertEqual(top.nearest_place.name, "Alpdorf")
         self.assertLess(top.nearest_place_km, 2)
+
+
+def with_cover(data, tags):
+    """Add one big land-cover polygon (~6-9 km) centred on the village."""
+    data["elements"].append({"type": "way", "id": 90, "tags": tags, "nodes": [1, 2, 3, 4, 1],
+                             "geometry": square(46.56, 7.96, 0.08)})
+    return data
+
+
+class GreenTests(unittest.TestCase):
+    def setUp(self):
+        self.s = Settings()
+
+    def place(self, data):
+        results, _ = score_places(osm.parse(data), self.s)
+        return results[0]
+
+    def test_unmapped_land_is_neutral(self):
+        r = self.place(raw_data())
+        self.assertEqual(r.cover.points, 0)
+
+    def test_forest_around_is_a_plus(self):
+        r = self.place(with_cover(raw_data(), {"landuse": "forest"}))
+        self.assertGreater(r.cover.green, 0.9)
+        self.assertAlmostEqual(r.cover.points, self.s.green_points * r.cover.green, delta=0.1)
+        self.assertAlmostEqual(r.score, r.peak_points + r.lake_points + r.blue_points + r.cover.points, delta=0.3)
+
+    def test_barren_around_is_a_minus_but_still_listed(self):
+        r = self.place(with_cover(raw_data(), {"natural": "sand"}))
+        self.assertGreater(r.cover.barren, 0.9)
+        self.assertLess(r.cover.points, 0)
+
+    def test_green_ranks_above_barren(self):
+        green = self.place(with_cover(raw_data(), {"natural": "grassland"}))
+        barren = self.place(with_cover(raw_data(), {"natural": "bare_rock"}))
+        self.assertGreater(green.score, barren.score)
+
+    def test_lake_water_is_not_counted_as_land(self):
+        f = osm.parse(with_cover(raw_data(), {"natural": "wood"}))
+        board = score_lakes(f, assess_lakes(f, self.s), self.s)
+        top = next(r for r in board if r.lake.lake.name == "Gletschersee")
+        self.assertGreater(top.cover.green, 0)
+        self.assertLessEqual(top.cover.green + top.cover.barren, 1.0)
 
 
 class CliTests(unittest.TestCase):

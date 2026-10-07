@@ -58,6 +58,22 @@ class Settings:
     blue_lake_points: float = 10.0   # the "+ point" for blue lakes (scaled by confidence)
     max_peak_points: float = 25.0
     max_lakes_counted: int = 5
+    # Green surroundings: forest, meadow, grassland... are a plus; bare rock, scree, sand, ice a minus.
+    green_km: float = 2.0            # look this far around a place / a lake's shore
+    green_points: float = 5.0        # +5 when everything around is green
+    barren_points: float = 5.0       # -5 when everything around is barren
+
+
+@dataclass
+class Cover:
+    """Share of the land (water excluded) around a spot that is green / barren.
+    The rest is land with no mapped cover, which counts as neutral."""
+    green: float = 0.0
+    barren: float = 0.0
+    points: float = 0.0
+
+    def describe(self) -> str:
+        return f"{self.green:.0%} green, {self.barren:.0%} barren"
 
 
 @dataclass
@@ -81,6 +97,7 @@ class PlaceScore:
     peaks: List[Feature]
     lakes: List[LakeAssessment]
     lake_distances_km: Dict[int, float]
+    cover: Cover = field(default_factory=Cover)
 
 
 # ---------------------------------------------------------------- streams ---
@@ -250,6 +267,7 @@ class LakeScore:
     peaks: List[Feature]
     nearest_place: Optional[Feature]
     nearest_place_km: Optional[float]
+    cover: Cover = field(default_factory=Cover)
 
 
 # ----------------------------------------------------------------- places ---
@@ -268,6 +286,37 @@ def _peak_points(origin: List[geo.Point], peaks: List[Feature], s: Settings) -> 
     return s.max_peak_points * (1 - math.exp(-pts / s.max_peak_points))
 
 
+class LandCover:
+    """Point-in-polygon lookups for green land, barren land and water."""
+
+    def __init__(self, features: Dict[str, List[Feature]], s: Settings):
+        self.s = s
+        barren = (features.get("barren", []) + features.get("glacier", [])
+                  + [r for r in features.get("rocky", []) if r.tags.get("natural") in ("scree", "bare_rock")])
+        self.green = geo.PolygonIndex([f.rings for f in features.get("green", []) if f.rings])
+        self.barren = geo.PolygonIndex([f.rings for f in barren if f.rings])
+        self.water = geo.PolygonIndex([f.rings for f in features.get("lake", []) if f.rings])
+
+    def around(self, center: geo.Point, radius_m: float) -> Cover:
+        land = green = barren = 0
+        for p in geo.sample_disc(center, radius_m):
+            if self.water.contains(p):
+                continue
+            land += 1
+            if self.green.contains(p):
+                green += 1
+            elif self.barren.contains(p):
+                barren += 1
+        if not land:
+            return Cover()
+        g, b = green / land, barren / land
+        return Cover(round(g, 2), round(b, 2), round(self.s.green_points * g - self.s.barren_points * b, 1))
+
+    def around_lake(self, lake: Feature) -> Cover:
+        reach = max((geo.haversine_m(lake.center, p) for p in geo.thin(lake.points, 60)), default=0)
+        return self.around(lake.center, min(reach, 10_000) + self.s.green_km * 1000)
+
+
 def _blue_share(la: LakeAssessment, s: Settings) -> float:
     return 1.0 if la.is_blue else s.likely_factor if la.is_likely_blue else 0.0
 
@@ -283,9 +332,12 @@ def score_lakes(
     assessed: List[LakeAssessment],
     s: Optional[Settings] = None,
     require_mountains: bool = True,
+    cover: Optional[LandCover] = None,
 ) -> List[LakeScore]:
-    """Scoreboard of lakes: mountains around the shore + the lake itself + blue bonus."""
+    """Scoreboard of lakes: mountains around the shore + the lake itself + blue bonus
+    + green surroundings (minus for barren ones)."""
     s = s or Settings()
+    cover = cover or LandCover(features, s)
     results: List[LakeScore] = []
     for la in assessed:
         shore = geo.thin(la.lake.points, 100)
@@ -306,9 +358,10 @@ def score_lakes(
             if nearest_km is None or d < nearest_km:
                 nearest, nearest_km = place, round(d, 2)
 
+        land = cover.around_lake(la.lake)
         peaks.sort(key=lambda p: p.ele or 0, reverse=True)
-        results.append(LakeScore(la, round(peak_pts + lake_pts + blue_pts, 1), round(peak_pts, 1),
-                                 round(lake_pts, 1), round(blue_pts, 1), peaks, nearest, nearest_km))
+        results.append(LakeScore(la, round(peak_pts + lake_pts + blue_pts + land.points, 1), round(peak_pts, 1),
+                                 round(lake_pts, 1), round(blue_pts, 1), peaks, nearest, nearest_km, land))
     results.sort(key=lambda r: r.score, reverse=True)
     return results
 
@@ -318,9 +371,11 @@ def score_places(
     s: Optional[Settings] = None,
     require_both: bool = True,
     assessed: Optional[List[LakeAssessment]] = None,
+    cover: Optional[LandCover] = None,
 ) -> tuple:
     """Return (sorted list of PlaceScore, list of LakeAssessment)."""
     s = s or Settings()
+    cover = cover or LandCover(features, s)
     if assessed is None:
         assessed = assess_lakes(features, s)
 
@@ -351,10 +406,11 @@ def score_places(
         lake_pts = sum(b for b, _ in counted)
         blue_pts = sum(x for _, x in counted)
         peak_pts = _peak_points([place.center], peaks, s)
+        land = cover.around(place.center, s.green_km * 1000)
         peaks.sort(key=lambda p: p.ele or 0, reverse=True)
-        results.append(PlaceScore(place, round(peak_pts + lake_pts + blue_pts, 1),
+        results.append(PlaceScore(place, round(peak_pts + lake_pts + blue_pts + land.points, 1),
                                   round(peak_pts, 1), round(lake_pts, 1), round(blue_pts, 1),
-                                  peaks, near, dists))
+                                  peaks, near, dists, land))
 
     results.sort(key=lambda r: r.score, reverse=True)
     return results, assessed

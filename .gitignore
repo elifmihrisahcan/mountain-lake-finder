@@ -4,3 +4,4 @@ __pycache__/
 # your own run outputs (examples/ is kept)
 /*.html
 /*.json
+cache/
