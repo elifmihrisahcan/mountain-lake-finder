@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+# your own run outputs (examples/ is kept)
+/*.html
+/*.json
