@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-from typing import List, Optional
+import os
+from typing import List, Optional, Tuple
 
 from .scoring import LakeAssessment, LakeScore, PlaceScore
 
@@ -59,9 +60,25 @@ def place_dict(r: PlaceScore) -> dict:
 
 
 def to_json(results: List[PlaceScore], lakes: List[LakeAssessment],
-            lake_scores: Optional[List[LakeScore]] = None) -> str:
-    return json.dumps({"lakes": [lake_score_dict(r) for r in lake_scores or []],
+            lake_scores: Optional[List[LakeScore]] = None, region: Optional[str] = None) -> str:
+    return json.dumps({"region": region,
+                       "lakes": [lake_score_dict(r) for r in lake_scores or []],
                        "places": [place_dict(r) for r in results]}, indent=2, ensure_ascii=False)
+
+
+def world_map(paths: List[str]) -> Tuple[str, List[str]]:
+    """Merge several saved result JSON files (one per country/region) into one map."""
+    lakes, places, regions = [], [], []
+    for path in sorted(paths):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        region = data.get("region") or os.path.splitext(os.path.basename(path))[0].replace("-", " ").title()
+        regions.append(region)
+        lakes += [dict(l, region=region) for l in data.get("lakes", [])]
+        places += [dict(p, region=region) for p in data.get("places", [])]
+    lakes.sort(key=lambda l: l.get("score", 0), reverse=True)
+    places.sort(key=lambda p: p["score"], reverse=True)
+    return _render({"places": places, "lakes": lakes, "regions": regions}), regions
 
 
 def to_table(results: List[PlaceScore], lakes: List[LakeAssessment], top: int,
@@ -122,11 +139,14 @@ MAP_TEMPLATE = """<!doctype html>
  @media (max-width:700px){#map{inset:0 0 45% 0}#side{top:55%;width:100%}}
 </style></head><body><div id="map"></div><div id="side">
 <div class="tabs"><button id="tLakes" class="on">Lakes</button><button id="tPlaces">Places</button></div>
+<select id="region" style="width:100%;margin-bottom:8px;padding:5px;display:none"></select>
 <div id="list"></div>
 <p style="color:#666">Blue = glacier-fed lake (+ bonus). Light blue = likely blue (half bonus). Grey = other lakes. Red = places. Scores add points for green surroundings and subtract for barren ones.</p></div>
 <script>
 const DATA = __DATA__;
-const map = L.map('map');
+const map = L.map('map', {preferCanvas: true});
+const LIST_MAX = 300;
+let region = '';
 L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
   {maxZoom:17, attribution:'&copy; OpenStreetMap contributors, SRTM | &copy; OpenTopoMap'}).addTo(map);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -169,21 +189,48 @@ function show(which) {
   document.getElementById('tLakes').className = which === 'lakes' ? 'on' : '';
   document.getElementById('tPlaces').className = which === 'places' ? 'on' : '';
   list.innerHTML = '';
+  const inRegion = x => !region || x.region === region;
+  const where = x => (DATA.regions.length > 1 && x.region ? ' · ' + esc(x.region) : '');
   if (which === 'lakes') {
-    const ranked = DATA.lakes.filter(l => l.score != null);
+    const ranked = DATA.lakes.filter(l => l.score != null && inRegion(l)).slice(0, LIST_MAX);
     if (!ranked.length) list.textContent = 'No lakes with mountains nearby.';
     ranked.forEach((l, i) => row(i, esc(l.name || 'Unnamed lake') + pill(l), l.score,
-      `${l.peak_count} peaks${l.ele != null ? ' · ' + Math.round(l.ele) + ' m' : ''}${l.nearest_place ? ' · near ' + esc(l.nearest_place) : ''}`,
+      `${l.peak_count} peaks${l.ele != null ? ' · ' + Math.round(l.ele) + ' m' : ''}${l.nearest_place ? ' · near ' + esc(l.nearest_place) : ''}${where(l)}`,
       () => { map.setView([l.lat, l.lon], 13); lakeMarkers[l.osm].openPopup(); }));
   } else {
-    if (!DATA.places.length) list.textContent = 'No places with mountains and lakes nearby.';
-    DATA.places.forEach((p, i) => row(i, esc(p.name), p.score,
-      `${p.lakes.filter(l => l.blue).length} blue, ${p.lakes.filter(l => l.likely_blue).length} likely blue, ${p.peak_count} peaks`,
+    const ranked = DATA.places.map((p, i) => [p, i]).filter(([p]) => inRegion(p)).slice(0, LIST_MAX);
+    if (!ranked.length) list.textContent = 'No places with mountains and lakes nearby.';
+    ranked.forEach(([p, i], n) => row(n, esc(p.name), p.score,
+      `${p.lakes.filter(l => l.blue).length} blue, ${p.lakes.filter(l => l.likely_blue).length} likely blue, ${p.peak_count} peaks${where(p)}`,
       () => { map.setView([p.lat, p.lon], 12); placeMarkers[i].openPopup(); }));
   }
 }
-document.getElementById('tLakes').onclick = () => show('lakes');
+document.getElementById('tLakes').onclick = () => let current = 'lakes';
+const sel = document.getElementById('region');
+if (DATA.regions.length > 1) {
+  sel.style.display = 'block';
+  sel.innerHTML = '<option value="">All regions (' + DATA.regions.length + ')</option>' +
+    DATA.regions.map(r => `<option>${esc(r)}</option>`).join('');
+  sel.onchange = () => {
+    region = sel.value; show(current);
+    const pts = DATA.lakes.concat(DATA.places).filter(x => !region || x.region === region).map(x => [x.lat, x.lon]);
+    if (pts.length) map.fitBounds(pts, {padding: [20, 20]});
+  };
+}
+show('lakes');
 document.getElementById('tPlaces').onclick = () => show('places');
+let current = 'lakes';
+const sel = document.getElementById('region');
+if (DATA.regions.length > 1) {
+  sel.style.display = 'block';
+  sel.innerHTML = '<option value="">All regions (' + DATA.regions.length + ')</option>' +
+    DATA.regions.map(r => `<option>${esc(r)}</option>`).join('');
+  sel.onchange = () => {
+    region = sel.value; show(current);
+    const pts = DATA.lakes.concat(DATA.places).filter(x => !region || x.region === region).map(x => [x.lat, x.lon]);
+    if (pts.length) map.fitBounds(pts, {padding: [20, 20]});
+  };
+}
 show('lakes');
 bounds.length ? map.fitBounds(bounds, {padding: [20, 20]}) : map.setView([46.6, 8.0], 9);
 </script></body></html>
@@ -195,6 +242,9 @@ def to_map(results: List[PlaceScore], lakes: List[LakeAssessment],
     scored = {r.lake.lake.osm_id: lake_score_dict(r) for r in lake_scores or []}
     # Ranked lakes first (in scoreboard order), then the rest so they still show on the map.
     all_lakes = list(scored.values()) + [lake_dict(l) for l in lakes if l.lake.osm_id not in scored]
-    data = {"places": [place_dict(r) for r in results], "lakes": all_lakes}
+    return _render({"places": [place_dict(r) for r in results], "lakes": all_lakes, "regions": []})
+
+
+def _render(data: dict) -> str:
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     return MAP_TEMPLATE.replace("__DATA__", payload)

@@ -221,6 +221,22 @@ class CliTests(unittest.TestCase):
             with open(page) as f:
                 self.assertIn("Gletschersee", f.read())
 
+    def test_world_map_merges_regions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "raw.json")
+            with open(src, "w") as f:
+                json.dump(raw_data(), f)
+            out = os.path.join(tmp, "results")
+            os.mkdir(out)
+            for name in ("alpland", "glacia"):
+                cli.main(["--from-file", src, "--no-elevation", "--json", os.path.join(out, f"{name}.json")])
+            self.assertEqual(cli.main(["--world", out]), 0)
+            with open(os.path.join(out, "world.html")) as f:
+                page = f.read()
+            data = json.loads(page.split("const DATA = ")[1].split(";\n")[0])
+            self.assertEqual(data["regions"], ["Alpland", "Glacia"])
+            self.assertEqual({l["region"] for l in data["lakes"]}, {"Alpland", "Glacia"})
+
     def test_map_escapes_script_breakout(self):
         page = report.to_map([], [])
         self.assertNotIn("</script><", page.split("const DATA")[1].split(";")[0])

@@ -5,3 +5,4 @@ __pycache__/
 /*.html
 /*.json
 cache/
+results/*.txt

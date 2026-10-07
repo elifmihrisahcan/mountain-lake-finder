@@ -36,7 +36,7 @@ def country_area_id(name: str) -> Tuple[int, str]:
 
 
 def plan_tiles(area_id: int, tile_deg: float, min_peaks: int) -> List[Box]:
-    data = osm.overpass(f'[out:json][timeout:600];area({area_id})->.c;'
+    data = osm.overpass(f'[out:json][timeout:300];area({area_id})->.c;'
                         f'node["natural"~"^(peak|volcano)$"](area.c);out skel qt;')
     counts = Counter((math.floor(e["lat"] / tile_deg), math.floor(e["lon"] / tile_deg))
                      for e in data["elements"])
@@ -115,7 +115,10 @@ def scan(
     places: Dict[int, PlaceScore] = {}
     lakes: Dict[int, LakeAssessment] = {}
     boards: Dict[int, LakeScore] = {}
-    for n, core in enumerate(tiles, 1):
+    failed: List[Box] = []
+    queue = [(n, core, False) for n, core in enumerate(tiles, 1)]
+    while queue:
+        n, core, retry = queue.pop(0)
         path = os.path.join(cache_dir, f"tile_{core[0]:+.2f}_{core[1]:+.2f}.json")
         t0 = time.time()
         if os.path.exists(path):
@@ -126,7 +129,14 @@ def scan(
             try:
                 raw = osm.overpass(tile_query(plan["area_id"], core, s))
             except RuntimeError as err:
-                print(f"  [{n}/{len(tiles)}] {core}: skipped ({err}); rerun to retry", file=sys.stderr)
+                if retry:
+                    failed.append(core)
+                    print(f"  [{n}/{len(tiles)}] {core}: failed again ({err}); rerun later to retry",
+                          file=sys.stderr)
+                else:
+                    queue.append((n, core, True))  # second pass at the end, when the server may be calmer
+                    print(f"  [{n}/{len(tiles)}] {core}: server busy, will retry at the end", file=sys.stderr)
+                    time.sleep(30)
                 continue
             with open(path, "w") as f:
                 json.dump(raw, f)
@@ -152,6 +162,9 @@ def scan(
         print(f"  [{n}/{len(tiles)}] {core[0]:.0f},{core[1]:.0f} {source} {time.time() - t0:.0f}s: "
               f"{len(features['lake'])} lakes, {blue} blue, {len(features['peak'])} peaks", file=sys.stderr)
 
+    if failed:
+        print(f"{len(failed)} tiles could not be downloaded; run the same command again to fill them in.",
+              file=sys.stderr)
     return (sorted(places.values(), key=lambda r: r.score, reverse=True),
             list(lakes.values()),
             sorted(boards.values(), key=lambda r: r.score, reverse=True))

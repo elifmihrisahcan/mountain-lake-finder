@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from . import country, geo, osm, report
@@ -26,6 +27,8 @@ def main(argv=None) -> int:
     where.add_argument("--bbox", help="south,west,north,east")
     where.add_argument("--from-file", help="load a saved Overpass JSON response instead of querying")
     where.add_argument("--country", help="scan a whole country (name or ISO code), tile by tile")
+    where.add_argument("--world", metavar="DIR",
+                       help="merge every result .json in DIR into one map, DIR/world.html")
     ap.add_argument("--lon", type=float)
     ap.add_argument("--radius", type=float, default=20, help="search radius in km around --place/--lat (default 20)")
     ap.add_argument("--top", type=int, default=15, help="rows to print")
@@ -44,6 +47,17 @@ def main(argv=None) -> int:
                         help=argparse.SUPPRESS if name.endswith("points") else None)
     args = ap.parse_args(argv)
     settings = Settings(**{k: getattr(args, k) for k in vars(Settings())})
+
+    if args.world:
+        paths = [os.path.join(args.world, f) for f in os.listdir(args.world) if f.endswith(".json")]
+        if not paths:
+            ap.error(f"no result .json files in {args.world}; run --country ... --json {args.world}/<name>.json first")
+        page, regions = report.world_map(paths)
+        out = args.map or os.path.join(args.world, "world.html")
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(page)
+        print(f"Wrote {out} with {len(regions)} regions: {', '.join(regions)}")
+        return 0
 
     if args.country:
         cache = args.cache_dir or f"cache/{args.country.lower().replace(' ', '-')}"
@@ -99,7 +113,7 @@ def _output(args, results, lakes, lake_scores) -> int:
     print(report.to_table(results, lakes, args.top, lake_scores))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
-            f.write(report.to_json(results, lakes, lake_scores))
+            f.write(report.to_json(results, lakes, lake_scores, region=args.country))
         print(f"\nWrote {args.json}", file=sys.stderr)
     if args.map:
         with open(args.map, "w", encoding="utf-8") as f:

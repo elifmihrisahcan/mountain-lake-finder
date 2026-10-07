@@ -30,6 +30,23 @@ python3 -m lakefinder --bbox 46.6,8.27,46.83,8.59 --save-raw susten-raw.json
 python3 -m lakefinder --from-file susten-raw.json --glacier-km 3 --map susten.html
 ```
 
+### Building a world map, country by country
+
+```bash
+python3 -m lakefinder --country Switzerland --map results/switzerland.html --json results/switzerland.json
+```
+
+```bash
+python3 -m lakefinder --world results
+```
+
+`--country` splits the country into 1° tiles, skips tiles without mountains, and
+caches every tile in `cache/<country>/`. If the public map servers reject a
+tile, it is retried at the end; running the same command again only downloads
+what's missing. `--world results` merges every country's `.json` in `results/`
+into one map, `results/world.html`, with a region filter. Scan one country at
+a time: the public servers reject parallel scans.
+
 The terminal output has two scoreboards:
 
 ```
@@ -76,6 +93,7 @@ For each lake of at least 1 ha:
 - **Mountains**: each peak within 10 km of the shore gives 1 point, plus 1 per 1000 m of height above 1000 m. Closer peaks count more, and the total levels off softly at 25.
 - **Lake**: 4 points, plus 2 if larger than 50 ha.
 - **Blue lake bonus (+)**: 10 × confidence for a blue lake, or half that for a likely-blue lake.
+- **Green surroundings (+/−)**: within 2 km of the shore, green land (forest, meadow, grassland, scrub, farmland, parks) adds up to +5 and barren land (bare rock, scree, sand, desert, glacier ice) subtracts up to 5. Land with no mapped cover is neutral.
 
 Lakes with no peaks within 10 km are left off the scoreboard unless you pass `--all`.
 
@@ -86,6 +104,7 @@ For each city, town, village or hamlet:
 - **Mountains**: each peak within 10 km gives 1 point, plus 1 per 1000 m of height above 1000 m. Closer peaks count more, and the total levels off softly at 25.
 - **Lakes**: the best 5 lakes within 10 km give 4 points each, plus 2 if larger than 50 ha. Closer lakes count more.
 - **Blue lake bonus**: 10 × confidence for each blue lake (half that for likely blue), with the same distance weighting.
+- **Green surroundings (+/−)**: the same green/barren check, within 2 km of the place.
 
 Places with no mountains or no lakes nearby are skipped unless you pass `--all`.
 
@@ -93,6 +112,7 @@ Places with no mountains or no lakes nearby are skipped unless you pass `--all`.
 
 - The result is only as good as OSM mapping. Glaciers are retreating faster than maps get updated, and some meltwater streams aren't mapped.
 - Not every glacier lake is blue (very muddy proglacial lakes can be grey), and some clear blue lakes aren't glacial.
+- Land cover is often unmapped outside Europe, so the green score there is frequently 0 (neutral) rather than a real measurement.
 - The public Overpass servers are rate-limited. Large areas (radius > ~30 km in the Alps) can time out, so split them up or use `--save-raw`.
 
 ## Tests
